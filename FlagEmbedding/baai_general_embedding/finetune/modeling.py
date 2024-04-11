@@ -8,7 +8,7 @@ from torch import nn, Tensor
 from transformers import AutoModel
 from transformers.file_utils import ModelOutput
 
-from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training, TaskType
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class BiEncoderModel(nn.Module):
                                  lora_dropout=0.05,
                                  bias="none",
                                  task_type=TaskType.SEQ_2_SEQ_LM)
-        model = prepare_model_for_int8_training(
+        model = prepare_model_for_kbit_training(
             AutoModel.from_pretrained(model_name))
         self.model = get_peft_model(model, lora_config)
         # self.model = AutoModel.from_pretrained(model_name)
