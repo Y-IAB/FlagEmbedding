@@ -8,6 +8,8 @@ from torch import nn, Tensor
 from transformers import AutoModel
 from transformers.file_utils import ModelOutput
 
+from peft import LoraConfig, get_peft_model, prepare_model_for_int8_training, TaskType
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,10 +30,19 @@ class BiEncoderModel(nn.Module):
                  sentence_pooling_method: str = 'cls',
                  negatives_cross_device: bool = False,
                  temperature: float = 1.0,
-                 use_inbatch_neg: bool = True
-                 ):
+                 use_inbatch_neg: bool = True):
         super().__init__()
-        self.model = AutoModel.from_pretrained(model_name)
+        # NOTE(kim.geon): Wrap the model with Lora
+        lora_config = LoraConfig(r=16,
+                                 lora_alpha=32,
+                                 target_modules=["q", "v"],
+                                 lora_dropout=0.05,
+                                 bias="none",
+                                 task_type=TaskType.SEQ_2_SEQ_LM)
+        model = prepare_model_for_int8_training(
+            AutoModel.from_pretrained(model_name))
+        self.model = get_peft_model(model, lora_config)
+        # self.model = AutoModel.from_pretrained(model_name)
         self.cross_entropy = nn.CrossEntropyLoss(reduction='mean')
 
         self.normlized = normlized
@@ -42,12 +53,16 @@ class BiEncoderModel(nn.Module):
 
         if not normlized:
             self.temperature = 1.0
-            logger.info("reset temperature = 1.0 due to using inner product to compute similarity")
+            logger.info(
+                "reset temperature = 1.0 due to using inner product to compute similarity"
+            )
 
         self.negatives_cross_device = negatives_cross_device
         if self.negatives_cross_device:
             if not dist.is_initialized():
-                raise ValueError('Distributed training has not been initialized for representation all gather.')
+                raise ValueError(
+                    'Distributed training has not been initialized for representation all gather.'
+                )
             #     logger.info("Run in a single GPU, set negatives_cross_device=False")
             #     self.negatives_cross_device = False
             # else:
@@ -69,7 +84,8 @@ class BiEncoderModel(nn.Module):
         if features is None:
             return None
         psg_out = self.model(**features, return_dict=True)
-        p_reps = self.sentence_embedding(psg_out.last_hidden_state, features['attention_mask'])
+        p_reps = self.sentence_embedding(psg_out.last_hidden_state,
+                                         features['attention_mask'])
         if self.normlized:
             p_reps = torch.nn.functional.normalize(p_reps, dim=-1)
         return p_reps.contiguous()
@@ -79,7 +95,10 @@ class BiEncoderModel(nn.Module):
             return torch.matmul(q_reps, p_reps.transpose(0, 1))
         return torch.matmul(q_reps, p_reps.transpose(-2, -1))
 
-    def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None, teacher_score: Tensor = None):
+    def forward(self,
+                query: Dict[str, Tensor] = None,
+                passage: Dict[str, Tensor] = None,
+                teacher_score: Tensor = None):
         q_reps = self.encode(query)
         p_reps = self.encode(passage)
 
@@ -90,17 +109,28 @@ class BiEncoderModel(nn.Module):
 
             group_size = p_reps.size(0) // q_reps.size(0)
             if self.use_inbatch_neg:
-                scores = self.compute_similarity(q_reps, p_reps) / self.temperature # B B*G
+                scores = self.compute_similarity(
+                    q_reps, p_reps) / self.temperature  # B B*G
                 scores = scores.view(q_reps.size(0), -1)
 
-                target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
+                target = torch.arange(scores.size(0),
+                                      device=scores.device,
+                                      dtype=torch.long)
                 target = target * group_size
                 loss = self.compute_loss(scores, target)
             else:
-                scores = self.compute_similarity(q_reps[:, None, :,], p_reps.view(q_reps.size(0), group_size, -1)).squeeze(1) / self.temperature # B G
+                scores = self.compute_similarity(
+                    q_reps[
+                        :,
+                        None,
+                        :,
+                    ], p_reps.view(q_reps.size(0), group_size,
+                                   -1)).squeeze(1) / self.temperature  # B G
 
                 scores = scores.view(q_reps.size(0), -1)
-                target = torch.zeros(scores.size(0), device=scores.device, dtype=torch.long)
+                target = torch.zeros(scores.size(0),
+                                     device=scores.device,
+                                     dtype=torch.long)
                 loss = self.compute_loss(scores, target)
 
         else:
@@ -131,8 +161,8 @@ class BiEncoderModel(nn.Module):
 
     def save(self, output_dir: str):
         state_dict = self.model.state_dict()
-        state_dict = type(state_dict)(
-            {k: v.clone().cpu()
-             for k,
-                 v in state_dict.items()})
+        state_dict = type(state_dict)({
+            k: v.clone().cpu()
+            for k, v in state_dict.items()
+        })
         self.model.save_pretrained(output_dir, state_dict=state_dict)
