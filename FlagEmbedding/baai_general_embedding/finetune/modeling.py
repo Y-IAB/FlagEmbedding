@@ -38,7 +38,7 @@ class BiEncoderModel(nn.Module):
                                  target_modules=["query", "value"],
                                  lora_dropout=0.05,
                                  bias="none",
-                                 task_type=TaskType.SEQ_CLS)
+                                 task_type=TaskType.FEATURE_EXTRACTION)
         model = prepare_model_for_kbit_training(
             AutoModel.from_pretrained(model_name))
         self.model = get_peft_model(model, lora_config)
